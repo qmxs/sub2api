@@ -40,10 +40,12 @@ func TestNewAPIBillingRejectsNonConsumptionRecord(t *testing.T) {
 }
 
 func TestClaudeBillingObserverInitialOutputAndTail(t *testing.T) {
-	b := &claudeJournalBody{ReadCloser: io.NopCloser(strings.NewReader("")), attempt: &ClaudeBillingAttempt{}}
+	b := &claudeJournalBody{ReadCloser: io.NopCloser(strings.NewReader("")), attempt: &ClaudeBillingAttempt{Snapshot:ClaudeBillingSnapshot{StartedAt:time.Now().Add(-1250*time.Millisecond)}},stream:true}
 	b.observeLine(`data: {"type":"message_start","message":{"usage":{"input_tokens":82654,"output_tokens":3}}}`)
 	require.Equal(t, 82654, b.attempt.Observed.InputTokens)
 	require.Equal(t, 3, b.attempt.Observed.OutputTokens)
+	require.NotNil(t,b.attempt.FirstTokenMs)
+	require.GreaterOrEqual(t,*b.attempt.FirstTokenMs,1250)
 	b.observeLine(`data: {"type":"message_delta","usage":{"output_tokens":15}}`)
 	require.Equal(t, 15, b.attempt.Observed.OutputTokens)
 }

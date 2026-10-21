@@ -72,6 +72,7 @@ type ClaudeBillingAttempt struct {
 	HTTPStatus        int
 	ErrorReason       string
 	FinishedAt        *time.Time
+	FirstTokenMs      *int
 }
 
 type ClaudeBillingJournal interface {
@@ -222,6 +223,12 @@ func (b *claudeJournalBody) observeLine(line string) {
 	data, ok := extractAnthropicSSEDataLine(strings.TrimSpace(line))
 	if !ok {
 		return
+	}
+	if b.stream && b.attempt.FirstTokenMs == nil && data != "" && data != "[DONE]" {
+		ms := int(time.Since(b.attempt.Snapshot.StartedAt).Milliseconds())
+		if ms >= 0 {
+			b.attempt.FirstTokenMs = &ms
+		}
 	}
 	if anthropicStreamEventIsTerminal("", data) {
 		b.terminal = true
@@ -461,7 +468,7 @@ func (s *GatewayService) reconcileClaudeAttempt(ctx context.Context, a *ClaudeBi
 		duration = int(a.FinishedAt.Sub(snap.StartedAt).Milliseconds())
 	}
 	mode := "token"
-	log := &UsageLog{UserID: snap.UserID, APIKeyID: snap.APIKeyID, AccountID: snap.AccountID, GroupID: &snap.GroupID, RequestID: requestID, Model: snap.Model, RequestedModel: snap.Model, UpstreamRequestID: optionalTrimmedStringPtr(a.UpstreamRequestID), RateMultiplier: snap.Multiplier, AccountRateMultiplier: &snap.AccountMultiplier, Stream: snap.Stream, DurationMs: &duration, BillingMode: &mode, CreatedAt: time.Now(), TotalCost: baseDelta, ActualCost: delta}
+	log := &UsageLog{UserID: snap.UserID, APIKeyID: snap.APIKeyID, AccountID: snap.AccountID, GroupID: &snap.GroupID, RequestID: requestID, Model: snap.Model, RequestedModel: snap.Model, UpstreamRequestID: optionalTrimmedStringPtr(a.UpstreamRequestID), RateMultiplier: snap.Multiplier, AccountRateMultiplier: &snap.AccountMultiplier, Stream: snap.Stream, DurationMs: &duration, FirstTokenMs: a.FirstTokenMs, BillingMode: &mode, CreatedAt: time.Now(), TotalCost: baseDelta, ActualCost: delta}
 	log.InputTokens = max(0, u.InputTokens-a.Billed.InputTokens)
 	log.OutputTokens = max(0, u.OutputTokens-a.Billed.OutputTokens)
 	log.CacheCreationTokens = max(0, u.CacheCreationInputTokens-a.Billed.CacheCreationInputTokens)

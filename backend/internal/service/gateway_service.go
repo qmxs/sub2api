@@ -611,7 +611,9 @@ type AudioUsage struct {
 }
 
 type ForwardResult struct {
-	RequestID string
+	// DurableBilling means a persisted upstream attempt owns settlement.
+	DurableBilling bool
+	RequestID      string
 	// UpstreamHeaders 是直接上游的响应头，用于按账户配置解析上游请求标识。
 	UpstreamHeaders http.Header
 	Usage           ClaudeUsage
@@ -884,6 +886,7 @@ func NewGatewayService(
 	if path := strings.TrimSpace(os.Getenv(debugGatewayBodyEnv)); path != "" {
 		svc.initDebugGatewayBodyFile(path)
 	}
+	svc.startClaudeBillingWorker()
 	return svc
 }
 

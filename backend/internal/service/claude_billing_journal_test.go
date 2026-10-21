@@ -28,6 +28,12 @@ func TestNewAPIBillingRejectsAmbiguousSemantics(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestNewAPIBillingFailedCallHasNoCharge(t *testing.T) {
+	u, err := decodeNewAPIBillingUsage(newAPIBillingLog{Type: 5, Other: `{"status_code":502}`})
+	require.NoError(t, err)
+	require.False(t, u.hasObservedTokens())
+}
+
 func TestClaudeBillingObserverInitialOutputAndTail(t *testing.T) {
 	b := &claudeJournalBody{ReadCloser: io.NopCloser(strings.NewReader("")), attempt: &ClaudeBillingAttempt{}}
 	b.observeLine(`data: {"type":"message_start","message":{"usage":{"input_tokens":82654,"output_tokens":3}}}`)

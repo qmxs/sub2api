@@ -265,6 +265,7 @@ func (b *claudeJournalBody) Close() error {
 
 // New API uses mutually exclusive Anthropic input/cache buckets. No request text is retained.
 type newAPIBillingLog struct {
+	Type      int    `json:"type"`
 	RequestID string `json:"request_id"`
 	Model     string `json:"model_name"`
 	Input     int    `json:"prompt_tokens"`
@@ -273,6 +274,9 @@ type newAPIBillingLog struct {
 }
 
 func decodeNewAPIBillingUsage(log newAPIBillingLog) (ClaudeUsage, error) {
+	if log.Type == 5 && log.Input == 0 && log.Output == 0 {
+		return ClaudeUsage{}, nil // New API failure log, not a consumption bill.
+	}
 	if log.Input < 0 || log.Output < 0 || !gjson.Valid(log.Other) {
 		return ClaudeUsage{}, errors.New("invalid upstream usage")
 	}
@@ -326,6 +330,9 @@ func (s *GatewayService) startClaudeBillingWorker() {
 		return
 	}
 	go func() {
+		cache := make(map[string]newAPIBillingLog)
+		var windowStart, windowEnd int64
+		page := 1
 		for {
 			time.Sleep(10 * time.Second)
 			func() {
@@ -341,18 +348,64 @@ func (s *GatewayService) startClaudeBillingWorker() {
 					logger.LegacyPrintf("service.gateway", "claude billing poll failed: %v", err)
 					return
 				}
-				queried := false
+				// One upstream search per cycle; pagination uses a fixed completed-time window.
+				// This supports hundreds of pending calls without a request-per-attempt backlog.
+				for i := range attempts {
+					if attempts[i].State == "ready" || attempts[i].UpstreamRequestID == "" {
+						continue
+					}
+					if windowStart == 0 {
+						windowStart = attempts[i].Snapshot.StartedAt.Add(-time.Minute).Unix()
+						windowEnd = time.Now().Add(-30 * time.Second).Unix()
+						page = 1
+					}
+					if windowEnd > windowStart {
+						entries, total, queryErr := queryNewAPIBillingPage(ctx, windowStart, windowEnd, page)
+						if queryErr == nil {
+							for _, entry := range entries {
+								if entry.RequestID != "" {
+									cache[entry.RequestID] = entry
+								}
+							}
+							if page*100 >= total || len(entries) == 0 {
+								windowStart = 0
+							} else {
+								page++
+							}
+						}
+					}
+					break
+				}
 				for i := range attempts {
 					if ctx.Err() != nil {
 						return
 					}
 					if attempts[i].State != "ready" {
-						if queried {
+						if attempts[i].UpstreamRequestID == "" {
+							_ = j.CheckClaudeAttempt(ctx, attempts[i].ID, "missing upstream request id; manual reconciliation required")
 							continue
 						}
-						queried = true // Upstream user search limit: at most six requests/minute.
+						entry, found := cache[attempts[i].UpstreamRequestID]
+						if !found {
+							continue
+						}
+						if entry.Model != attempts[i].Snapshot.Model {
+							_ = j.CheckClaudeAttempt(ctx, attempts[i].ID, "upstream bill model mismatch")
+							continue
+						}
+						usage, decodeErr := decodeNewAPIBillingUsage(entry)
+						if decodeErr != nil {
+							_ = j.CheckClaudeAttempt(ctx, attempts[i].ID, decodeErr.Error())
+							continue
+						}
+						attempts[i].Observed = usage
+						attempts[i].Authoritative = &usage
+						attempts[i].State = "ready"
 					}
 					s.reconcileClaudeAttempt(ctx, &attempts[i], j)
+				}
+				if len(cache) > 20000 {
+					cache = make(map[string]newAPIBillingLog)
 				}
 			}()
 		}
@@ -451,27 +504,9 @@ func queryNewAPIBillingWithCurl(ctx context.Context, base, token, user, requestI
 	}
 	u.Path = "/api/log/self"
 	u.RawQuery = url.Values{"request_id": {requestID}, "p": {"1"}, "page_size": {"10"}}.Encode()
-	// Credentials travel on stdin rather than command-line arguments, and redirects are not followed.
-	escape := func(s string) string {
-		return strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\n", "", "\r", "").Replace(s)
-	}
-	config := fmt.Sprintf("header = \"Authorization: Bearer %s\"\nheader = \"New-Api-User: %s\"\n", escape(token), escape(user))
-	// No shell is involved; the only variable argument is a validated HTTPS URL.
-	cmd := exec.CommandContext(ctx, "curl", "--silent", "--show-error", "--fail", "--max-time", "12", "--max-filesize", "1048576", "--user-agent", "Sub2API-Billing-Reconcile/1.0", "--config", "-", "--", u.String()) // #nosec G702 -- fixed executable/flags, HTTPS URL encoded with net/url, secrets on stdin.
-	cmd.Stdin = strings.NewReader(config)
-	body, err := cmd.Output()
+	response, err := fetchNewAPIBilling(ctx, u, token, user)
 	if err != nil {
-		return nil, errors.New("upstream billing transport unavailable")
-	}
-	var response struct {
-		Success bool `json:"success"`
-		Data    struct {
-			Total int                `json:"total"`
-			Items []newAPIBillingLog `json:"items"`
-		} `json:"data"`
-	}
-	if json.Unmarshal(body, &response) != nil || !response.Success {
-		return nil, errors.New("upstream billing authentication or format error")
+		return nil, err
 	}
 	if response.Data.Total != 1 || len(response.Data.Items) != 1 {
 		return nil, errors.New("upstream bill missing or ambiguous")
@@ -485,4 +520,46 @@ func queryNewAPIBillingWithCurl(ctx context.Context, base, token, user, requestI
 		return nil, err
 	}
 	return &usage, nil
+}
+
+type newAPIBillingResponse struct {
+	Success bool `json:"success"`
+	Data    struct {
+		Total int                `json:"total"`
+		Items []newAPIBillingLog `json:"items"`
+	} `json:"data"`
+}
+
+func queryNewAPIBillingPage(ctx context.Context, start, end int64, page int) ([]newAPIBillingLog, int, error) {
+	u, err := url.Parse(os.Getenv("CLAUDE_BILLING_NEWAPI_URL"))
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return nil, 0, errors.New("invalid billing origin")
+	}
+	u.Path = "/api/log/self"
+	u.RawQuery = url.Values{"start_timestamp": {strconv.FormatInt(start, 10)}, "end_timestamp": {strconv.FormatInt(end, 10)}, "p": {strconv.Itoa(page)}, "page_size": {"100"}}.Encode()
+	r, err := fetchNewAPIBilling(ctx, u, os.Getenv("CLAUDE_BILLING_NEWAPI_TOKEN"), os.Getenv("CLAUDE_BILLING_NEWAPI_USER"))
+	if err != nil {
+		return nil, 0, err
+	}
+	return r.Data.Items, r.Data.Total, nil
+}
+
+func fetchNewAPIBilling(ctx context.Context, u *url.URL, token, user string) (*newAPIBillingResponse, error) {
+	// Credentials travel on stdin rather than command-line arguments, and redirects are not followed.
+	escape := func(s string) string {
+		return strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\n", "", "\r", "").Replace(s)
+	}
+	config := fmt.Sprintf("header = \"Authorization: Bearer %s\"\nheader = \"New-Api-User: %s\"\n", escape(token), escape(user))
+	// No shell is involved; the only variable argument is a validated HTTPS URL.
+	cmd := exec.CommandContext(ctx, "curl", "--silent", "--show-error", "--fail", "--max-time", "12", "--max-filesize", "1048576", "--user-agent", "Sub2API-Billing-Reconcile/1.0", "--config", "-", "--", u.String()) // #nosec G702 -- fixed executable/flags, HTTPS URL encoded with net/url, secrets on stdin.
+	cmd.Stdin = strings.NewReader(config)
+	body, err := cmd.Output()
+	if err != nil {
+		return nil, errors.New("upstream billing transport unavailable")
+	}
+	var response newAPIBillingResponse
+	if json.Unmarshal(body, &response) != nil || !response.Success {
+		return nil, errors.New("upstream billing authentication or format error")
+	}
+	return &response, nil
 }

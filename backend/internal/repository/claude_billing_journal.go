@@ -30,7 +30,7 @@ func (r *usageBillingRepository) SaveClaudeAttempt(ctx context.Context, a *servi
 func (r *usageBillingRepository) PendingClaudeAttempts(ctx context.Context) ([]service.ClaudeBillingAttempt, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT id,local_request_id,upstream_request_id,snapshot,observed_usage,billed_usage,settled_cost,settled_base,revision,state,http_status,finished_at
 	FROM claude_billing_attempts WHERE (state IN('pending','ready') OR (state='running' AND started_at<now()-interval '16 minutes'))
-	AND (checked_at IS NULL OR checked_at<now()-interval '2 minutes') ORDER BY (state='ready') DESC, checked_at NULLS FIRST,started_at LIMIT 128`)
+	AND (checked_at IS NULL OR checked_at<now()-interval '2 minutes') ORDER BY (state='ready') DESC, checked_at NULLS FIRST,started_at LIMIT 1000`)
 	if err != nil {
 		return nil, err
 	}

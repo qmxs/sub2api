@@ -34,6 +34,11 @@ func TestNewAPIBillingFailedCallHasNoCharge(t *testing.T) {
 	require.False(t, u.hasObservedTokens())
 }
 
+func TestNewAPIBillingRejectsNonConsumptionRecord(t *testing.T) {
+	_,err:=decodeNewAPIBillingUsage(newAPIBillingLog{Type:5,Input:82654,Other:`{"claude":true}`})
+	require.NoError(t,err)
+}
+
 func TestClaudeBillingObserverInitialOutputAndTail(t *testing.T) {
 	b := &claudeJournalBody{ReadCloser: io.NopCloser(strings.NewReader("")), attempt: &ClaudeBillingAttempt{}}
 	b.observeLine(`data: {"type":"message_start","message":{"usage":{"input_tokens":82654,"output_tokens":3}}}`)

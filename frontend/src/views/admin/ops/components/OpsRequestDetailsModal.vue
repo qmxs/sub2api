@@ -52,7 +52,7 @@ const latencyLabel = computed(() => t(showTTFT.value ? 'admin.ops.ttftLabel' : '
 
 function formatLatency(row: OpsRequestDetail): string {
   const value = showTTFT.value ? row.first_token_ms : row.duration_ms
-  return typeof value === 'number' ? `${value} ms` : '-'
+  return typeof value === 'number' ? `${value} ms` : ''
 }
 
 const rangeLabel = computed(() => {
@@ -213,7 +213,7 @@ const kindBadgeClass = (kind: string) => {
                   </div>
                   <div class="break-all text-xs text-gray-600 dark:text-gray-300">{{ row.model || '-' }}</div>
                   <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-600 dark:text-gray-300">
-                    <span>{{ latencyLabel }}: {{ formatLatency(row) }}</span>
+                     <span v-if="formatLatency(row)">{{ latencyLabel }}: {{ formatLatency(row) }}</span>
                     <span>{{ row.status_code ?? '-' }}</span>
                   </div>
                   <div v-if="row.request_id" class="flex items-center gap-2">
@@ -239,7 +239,7 @@ const kindBadgeClass = (kind: string) => {
               <table v-else class="min-w-full divide-y divide-gray-200 dark:divide-dark-700">
                 <thead class="sticky top-0 z-10 bg-gray-50 dark:bg-dark-900">
                 <tr>
-                  <th class="px-4 py-3 text-left text-[11px] font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                   <th v-if="items.some(row => formatLatency(row))" class="px-4 py-3 text-left text-[11px] font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400">
                     {{ t('admin.ops.requestDetails.table.time') }}
                   </th>
                   <th class="px-4 py-3 text-left text-[11px] font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400">
@@ -267,7 +267,7 @@ const kindBadgeClass = (kind: string) => {
               </thead>
               <tbody class="divide-y divide-gray-200 bg-white dark:divide-dark-700 dark:bg-dark-800">
                 <tr v-for="(row, idx) in items" :key="idx" class="hover:bg-gray-50 dark:hover:bg-dark-700/50">
-                  <td class="whitespace-nowrap px-4 py-3 text-xs text-gray-600 dark:text-gray-300">
+                   <td v-if="formatLatency(row)" class="whitespace-nowrap px-4 py-3 text-xs text-gray-600 dark:text-gray-300">
                     {{ formatDateTime(row.created_at) }}
                   </td>
                   <td class="whitespace-nowrap px-4 py-3">

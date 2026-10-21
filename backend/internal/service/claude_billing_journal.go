@@ -52,6 +52,8 @@ type ClaudeBillingSnapshot struct {
 	AccountQuota      bool
 	StartedAt         time.Time
 	Stream            bool
+	UpstreamOrigin    string
+	UpstreamTokenName string
 	started           bool
 }
 
@@ -114,6 +116,8 @@ func (s *GatewayService) claudeBillingContext(ctx context.Context, account *Acco
 	}
 	snapshot := &ClaudeBillingSnapshot{UserID: i.Key.UserID, APIKeyID: i.Key.ID, GroupID: i.Key.Group.ID, AccountID: account.ID, Model: model, Multiplier: multiplier, AccountMultiplier: account.BillingRateMultiplier(), InputPrice: ip.TotalCost, OutputPrice: op.TotalCost, WritePrice: wp.TotalCost, Write1hPrice: w1.TotalCost, ReadPrice: rp.TotalCost, KeyQuota: i.Key.Quota > 0, KeyWindows: i.Key.HasRateLimits(), AccountQuota: account.HasAnyQuotaLimit(), StartedAt: i.At}
 	snapshot.Stream = parsed.Stream
+	snapshot.UpstreamOrigin = strings.TrimRight(strings.TrimSpace(account.GetCredential("base_url")), "/")
+	snapshot.UpstreamTokenName = account.GetExtraString("new_api_token_name")
 	return context.WithValue(ctx, claudeSnapshotKey{}, snapshot)
 }
 
@@ -267,6 +271,7 @@ func (b *claudeJournalBody) Close() error {
 type newAPIBillingLog struct {
 	Type      int    `json:"type"`
 	RequestID string `json:"request_id"`
+	TokenName string `json:"token_name"`
 	Model     string `json:"model_name"`
 	Input     int    `json:"prompt_tokens"`
 	Output    int    `json:"completion_tokens"`
@@ -274,7 +279,7 @@ type newAPIBillingLog struct {
 }
 
 func decodeNewAPIBillingUsage(log newAPIBillingLog) (ClaudeUsage, error) {
-	if log.Type == 5 && log.Input == 0 && log.Output == 0 {
+	if log.Type != 2 {
 		return ClaudeUsage{}, nil // New API failure log, not a consumption bill.
 	}
 	if log.Input < 0 || log.Output < 0 || !gjson.Valid(log.Other) {
@@ -301,14 +306,15 @@ func (s *GatewayService) queryClaudeBill(ctx context.Context, a *ClaudeBillingAt
 	if a.UpstreamRequestID == "" {
 		return nil, errors.New("missing upstream request id")
 	}
-	base := strings.TrimRight(os.Getenv("CLAUDE_BILLING_NEWAPI_URL"), "/")
-	token := os.Getenv("CLAUDE_BILLING_NEWAPI_TOKEN")
-	uid := os.Getenv("CLAUDE_BILLING_NEWAPI_USER")
+	base, token, uid, err := claudeBillingProviderForAttempt(a)
+	if err != nil {
+		return nil, err
+	}
 	if base == "" || token == "" || uid == "" {
 		return nil, errors.New("upstream billing not configured")
 	}
 	// curl is an explicit deployment dependency: this upstream rejects Go/Python TLS fingerprints.
-	return queryNewAPIBillingWithCurl(ctx, base, token, uid, a.UpstreamRequestID, a.Snapshot.Model)
+	return queryNewAPIBillingWithCurl(ctx, base, token, uid, a.UpstreamRequestID, a.Snapshot.Model, a.Snapshot.UpstreamTokenName)
 }
 
 func claudeTargetCost(s ClaudeBillingSnapshot, u ClaudeUsage) (float64, float64) {
@@ -360,11 +366,13 @@ func (s *GatewayService) startClaudeBillingWorker() {
 						page = 1
 					}
 					if windowEnd > windowStart {
-						entries, total, queryErr := queryNewAPIBillingPage(ctx, windowStart, windowEnd, page)
+						entries, total, queryErr := queryNewAPIBillingPage(ctx, attempts[i].Snapshot.UpstreamOrigin, attempts[i].Snapshot.UpstreamTokenName, windowStart, windowEnd, page)
 						if queryErr == nil {
 							for _, entry := range entries {
 								if entry.RequestID != "" {
-									cache[entry.RequestID] = entry
+									if entry.Type == 2 {
+										cache[entry.RequestID] = entry
+									}
 								}
 							}
 							if page*100 >= total || len(entries) == 0 {
@@ -389,7 +397,7 @@ func (s *GatewayService) startClaudeBillingWorker() {
 						if !found {
 							continue
 						}
-						if entry.Model != attempts[i].Snapshot.Model {
+						if entry.Model != attempts[i].Snapshot.Model || (attempts[i].Snapshot.UpstreamTokenName != "" && entry.TokenName != attempts[i].Snapshot.UpstreamTokenName) {
 							_ = j.CheckClaudeAttempt(ctx, attempts[i].ID, "upstream bill model mismatch")
 							continue
 						}
@@ -497,13 +505,17 @@ func (s *GatewayService) reconcileClaudeAttempt(ctx context.Context, a *ClaudeBi
 	}
 }
 
-func queryNewAPIBillingWithCurl(ctx context.Context, base, token, user, requestID, model string) (*ClaudeUsage, error) {
+func queryNewAPIBillingWithCurl(ctx context.Context, base, token, user, requestID, model, tokenName string) (*ClaudeUsage, error) {
 	u, err := url.Parse(base)
 	if err != nil || u.Scheme != "https" || u.Host == "" {
 		return nil, errors.New("invalid billing origin")
 	}
 	u.Path = "/api/log/self"
-	u.RawQuery = url.Values{"request_id": {requestID}, "p": {"1"}, "page_size": {"10"}}.Encode()
+	values := url.Values{"request_id": {requestID}, "p": {"1"}, "page_size": {"10"}}
+	if tokenName != "" {
+		values.Set("token_name", tokenName)
+	}
+	u.RawQuery = values.Encode()
 	response, err := fetchNewAPIBilling(ctx, u, token, user)
 	if err != nil {
 		return nil, err
@@ -530,18 +542,50 @@ type newAPIBillingResponse struct {
 	} `json:"data"`
 }
 
-func queryNewAPIBillingPage(ctx context.Context, start, end int64, page int) ([]newAPIBillingLog, int, error) {
-	u, err := url.Parse(os.Getenv("CLAUDE_BILLING_NEWAPI_URL"))
+func queryNewAPIBillingPage(ctx context.Context, origin, tokenName string, start, end int64, page int) ([]newAPIBillingLog, int, error) {
+	if origin == "" {
+		origin = os.Getenv("CLAUDE_BILLING_NEWAPI_URL")
+	}
+	u, err := url.Parse(origin)
 	if err != nil || u.Scheme != "https" || u.Host == "" {
 		return nil, 0, errors.New("invalid billing origin")
 	}
 	u.Path = "/api/log/self"
-	u.RawQuery = url.Values{"start_timestamp": {strconv.FormatInt(start, 10)}, "end_timestamp": {strconv.FormatInt(end, 10)}, "p": {strconv.Itoa(page)}, "page_size": {"100"}}.Encode()
+	values := url.Values{"start_timestamp": {strconv.FormatInt(start, 10)}, "end_timestamp": {strconv.FormatInt(end, 10)}, "p": {strconv.Itoa(page)}, "page_size": {"100"}}
+	if tokenName != "" {
+		values.Set("token_name", tokenName)
+	}
+	u.RawQuery = values.Encode()
 	r, err := fetchNewAPIBilling(ctx, u, os.Getenv("CLAUDE_BILLING_NEWAPI_TOKEN"), os.Getenv("CLAUDE_BILLING_NEWAPI_USER"))
 	if err != nil {
 		return nil, 0, err
 	}
 	return r.Data.Items, r.Data.Total, nil
+}
+
+type claudeBillingProvider struct {
+	Origin string `json:"origin"`
+	User   string `json:"user"`
+	Token  string `json:"token"`
+}
+
+func claudeBillingProviderForAttempt(a *ClaudeBillingAttempt) (string, string, string, error) {
+	var providers []claudeBillingProvider
+	if raw := os.Getenv("CLAUDE_BILLING_NEWAPI_PROVIDERS"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &providers); err != nil {
+			return "", "", "", errors.New("invalid CLAUDE_BILLING_NEWAPI_PROVIDERS")
+		}
+	}
+	origin := strings.TrimRight(a.Snapshot.UpstreamOrigin, "/")
+	for _, p := range providers {
+		if strings.TrimRight(p.Origin, "/") == origin {
+			return strings.TrimRight(p.Origin, "/"), p.Token, p.User, nil
+		}
+	}
+	if origin == "" {
+		origin = strings.TrimRight(os.Getenv("CLAUDE_BILLING_NEWAPI_URL"), "/")
+	}
+	return origin, os.Getenv("CLAUDE_BILLING_NEWAPI_TOKEN"), os.Getenv("CLAUDE_BILLING_NEWAPI_USER"), nil
 }
 
 func fetchNewAPIBilling(ctx context.Context, u *url.URL, token, user string) (*newAPIBillingResponse, error) {

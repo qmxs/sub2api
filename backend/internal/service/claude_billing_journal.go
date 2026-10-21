@@ -168,10 +168,13 @@ type claudeJournalBody struct {
 	lastPersist time.Time
 	terminal    bool
 	once        sync.Once
+	mu          sync.Mutex
 }
 
 func (b *claudeJournalBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if n > 0 {
 		if len(b.buffer)+n <= 32<<20 {
 			b.buffer = append(b.buffer, p[:n]...)
@@ -242,6 +245,8 @@ func (b *claudeJournalBody) finish(readErr error) {
 }
 func (b *claudeJournalBody) Close() error {
 	err := b.ReadCloser.Close()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.finish(errors.New("body_closed"))
 	return err
 }
@@ -324,9 +329,16 @@ func (s *GatewayService) startClaudeBillingWorker() {
 					logger.LegacyPrintf("service.gateway", "claude billing poll failed: %v", err)
 					return
 				}
+				queried := false
 				for i := range attempts {
 					if ctx.Err() != nil {
 						return
+					}
+					if attempts[i].State != "ready" {
+						if queried {
+							continue
+						}
+						queried = true // Upstream user search limit: at most six requests/minute.
 					}
 					s.reconcileClaudeAttempt(ctx, &attempts[i], j)
 				}
@@ -349,6 +361,14 @@ func (s *GatewayService) reconcileClaudeAttempt(ctx context.Context, a *ClaudeBi
 		}
 	}
 	if !u.hasObservedTokens() {
+		if complete {
+			a.Authoritative = &u
+			_, _ = j.SettleClaudeAttempt(ctx, a, &UsageLog{}, &UsageBillingCommand{}, true)
+		}
+		return
+	}
+	if u.InputTokens < a.Billed.InputTokens || u.OutputTokens < a.Billed.OutputTokens || u.CacheCreationInputTokens < a.Billed.CacheCreationInputTokens || u.CacheReadInputTokens < a.Billed.CacheReadInputTokens {
+		_ = j.CheckClaudeAttempt(ctx, a.ID, "upstream token buckets below settled usage")
 		return
 	}
 	base, target := claudeTargetCost(a.Snapshot, u)

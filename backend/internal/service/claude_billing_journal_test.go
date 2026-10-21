@@ -1,6 +1,8 @@
 package service
 
 import (
+	"context"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -8,6 +10,35 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestClaudeBillingMetadataSurvivesSnapshotSerialization(t *testing.T) {
+	requested, effective := "max", "high"
+	ctx := WithClaudeBillingMetadata(context.Background(), "/v1/messages", "/v1/messages", &requested, &effective)
+	metadata, ok := ctx.Value(claudeBillingMetadataKey{}).(claudeBillingMetadata)
+	require.True(t, ok)
+	snapshot := ClaudeBillingSnapshot{InboundEndpoint: metadata.InboundEndpoint, UpstreamEndpoint: metadata.UpstreamEndpoint, RequestedReasoningEffort: metadata.RequestedReasoningEffort, ReasoningEffort: metadata.ReasoningEffort}
+	encoded, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+	var restored ClaudeBillingSnapshot
+	require.NoError(t, json.Unmarshal(encoded, &restored))
+	log := &UsageLog{}
+	applyClaudeBillingMetadata(log, restored)
+	require.Equal(t, "/v1/messages", *log.InboundEndpoint)
+	require.Equal(t, "/v1/messages", *log.UpstreamEndpoint)
+	require.Equal(t, "max", *log.RequestedReasoningEffort)
+	require.Equal(t, "high", *log.ReasoningEffort)
+}
+
+func TestClaudeBillingMetadataDoesNotInventAbsentEffort(t *testing.T) {
+	ctx := WithClaudeBillingMetadata(context.Background(), "/v1/messages", "/v1/messages", nil, nil)
+	metadata, ok := ctx.Value(claudeBillingMetadataKey{}).(claudeBillingMetadata)
+	require.True(t, ok)
+	log := &UsageLog{}
+	applyClaudeBillingMetadata(log, ClaudeBillingSnapshot{InboundEndpoint: metadata.InboundEndpoint, UpstreamEndpoint: metadata.UpstreamEndpoint})
+	require.NotNil(t, log.InboundEndpoint)
+	require.Nil(t, log.RequestedReasoningEffort)
+	require.Nil(t, log.ReasoningEffort)
+}
 
 func TestClaudeBillingInputWithoutOutput(t *testing.T) {
 	u, err := decodeNewAPIBillingUsage(newAPIBillingLog{Type: 2, Input: 82654, Other: `{"claude":true,"usage_semantic":"anthropic","cache_tokens":0,"cache_creation_tokens":0}`})

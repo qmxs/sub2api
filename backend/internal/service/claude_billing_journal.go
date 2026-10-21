@@ -34,6 +34,7 @@ type claudeBillingMetadata struct {
 	InboundEndpoint          string
 	UpstreamEndpoint         string
 	RequestedReasoningEffort string
+	ReasoningEffort          string
 }
 
 // WithClaudeBillingIdentity captures the actual selected group, including fallback routing.
@@ -41,12 +42,16 @@ func WithClaudeBillingIdentity(ctx context.Context, key *APIKey, sub *UserSubscr
 	return context.WithValue(ctx, claudeIdentityKey{}, claudeBillingIdentity{key, sub, at})
 }
 
-func WithClaudeBillingMetadata(ctx context.Context, inbound, upstream string, requestedReasoningEffort *string) context.Context {
-	effort := ""
+func WithClaudeBillingMetadata(ctx context.Context, inbound, upstream string, requestedReasoningEffort, reasoningEffort *string) context.Context {
+	requested := ""
 	if requestedReasoningEffort != nil {
-		effort = *requestedReasoningEffort
+		requested = *requestedReasoningEffort
 	}
-	return context.WithValue(ctx, claudeBillingMetadataKey{}, claudeBillingMetadata{inbound, upstream, effort})
+	effective := ""
+	if reasoningEffort != nil {
+		effective = *reasoningEffort
+	}
+	return context.WithValue(ctx, claudeBillingMetadataKey{}, claudeBillingMetadata{inbound, upstream, requested, effective})
 }
 
 type ClaudeBillingSnapshot struct {
@@ -144,7 +149,7 @@ func (s *GatewayService) claudeBillingContext(ctx context.Context, account *Acco
 		snapshot.InboundEndpoint = metadata.InboundEndpoint
 		snapshot.UpstreamEndpoint = metadata.UpstreamEndpoint
 		snapshot.RequestedReasoningEffort = metadata.RequestedReasoningEffort
-		snapshot.ReasoningEffort = metadata.RequestedReasoningEffort
+		snapshot.ReasoningEffort = metadata.ReasoningEffort
 	}
 	return context.WithValue(ctx, claudeSnapshotKey{}, snapshot)
 }
@@ -500,18 +505,7 @@ func (s *GatewayService) reconcileClaudeAttempt(ctx context.Context, a *ClaudeBi
 		requestedModel = snap.Model
 	}
 	log := &UsageLog{UserID: snap.UserID, APIKeyID: snap.APIKeyID, AccountID: snap.AccountID, GroupID: &snap.GroupID, RequestID: requestID, Model: snap.Model, RequestedModel: requestedModel, UpstreamRequestID: optionalTrimmedStringPtr(a.UpstreamRequestID), RateMultiplier: snap.Multiplier, AccountRateMultiplier: &snap.AccountMultiplier, Stream: snap.Stream, DurationMs: &duration, FirstTokenMs: a.FirstTokenMs, BillingMode: &mode, CreatedAt: time.Now(), TotalCost: baseDelta, ActualCost: delta}
-	if snap.InboundEndpoint != "" {
-		log.InboundEndpoint = &snap.InboundEndpoint
-	}
-	if snap.UpstreamEndpoint != "" {
-		log.UpstreamEndpoint = &snap.UpstreamEndpoint
-	}
-	if snap.ReasoningEffort != "" {
-		log.ReasoningEffort = &snap.ReasoningEffort
-	}
-	if snap.RequestedReasoningEffort != "" {
-		log.RequestedReasoningEffort = &snap.RequestedReasoningEffort
-	}
+	applyClaudeBillingMetadata(log, snap)
 	log.InputTokens = max(0, u.InputTokens-a.Billed.InputTokens)
 	log.OutputTokens = max(0, u.OutputTokens-a.Billed.OutputTokens)
 	log.CacheCreationTokens = max(0, u.CacheCreationInputTokens-a.Billed.CacheCreationInputTokens)
@@ -553,6 +547,13 @@ func (s *GatewayService) reconcileClaudeAttempt(ctx context.Context, a *ClaudeBi
 	if s.billingCacheService != nil {
 		_ = s.billingCacheService.InvalidateUserBalance(ctx, snap.UserID)
 	}
+}
+
+func applyClaudeBillingMetadata(log *UsageLog, snap ClaudeBillingSnapshot) {
+	log.InboundEndpoint = optionalTrimmedStringPtr(snap.InboundEndpoint)
+	log.UpstreamEndpoint = optionalTrimmedStringPtr(snap.UpstreamEndpoint)
+	log.ReasoningEffort = optionalTrimmedStringPtr(snap.ReasoningEffort)
+	log.RequestedReasoningEffort = optionalTrimmedStringPtr(snap.RequestedReasoningEffort)
 }
 
 func queryNewAPIBillingWithCurl(ctx context.Context, base, token, user, requestID, model, tokenName string) (*ClaudeUsage, error) {

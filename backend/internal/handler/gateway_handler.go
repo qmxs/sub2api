@@ -920,7 +920,13 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				result, err = h.antigravityGatewayService.Forward(requestCtx, c, account, attemptBody, hasBoundSession)
 			} else {
 				requestCtx = service.WithClaudeBillingIdentity(requestCtx, currentAPIKey, currentSubscription, pricingAt)
-				requestCtx = service.WithClaudeBillingMetadata(requestCtx, GetInboundEndpoint(c), GetUpstreamEndpoint(c, account.Platform), service.NormalizeClaudeOutputEffort(attemptParsedReq.OutputEffort))
+				requestedEffort := service.NormalizeClaudeOutputEffort(attemptParsedReq.OutputEffort)
+				effectiveEffort := requestedEffort
+				if effectiveEffort == nil && attemptParsedReq.ThinkingEnabled {
+					protocolModel := account.GetMappedModel(attemptParsedReq.Model)
+					effectiveEffort = service.DefaultEffortForThinkingEnabled(protocolModel)
+				}
+				requestCtx = service.WithClaudeBillingMetadata(requestCtx, GetInboundEndpoint(c), GetUpstreamEndpoint(c, account.Platform), requestedEffort, effectiveEffort)
 				result, err = h.gatewayService.Forward(requestCtx, c, account, attemptParsedReq)
 			}
 

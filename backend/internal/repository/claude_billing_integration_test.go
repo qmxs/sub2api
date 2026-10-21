@@ -34,7 +34,7 @@ func TestClaudeBillingPostgresJournal(t *testing.T) {
 	}
 	r := &usageBillingRepository{db: db}
 	firstToken := 123
-	a := &service.ClaudeBillingAttempt{ID: "pg-attempt", Snapshot: service.ClaudeBillingSnapshot{AccountID: 4, APIKeyID: 2, StartedAt: time.Now()}, State: "pending", UpstreamRequestID: "upstream-id", FirstTokenMs: &firstToken}
+	a := &service.ClaudeBillingAttempt{ID: "pg-attempt", Snapshot: service.ClaudeBillingSnapshot{AccountID: 4, APIKeyID: 2, StartedAt: time.Now(), InboundEndpoint: "/v1/messages", UpstreamEndpoint: "/v1/messages", RequestedReasoningEffort: "max", ReasoningEffort: "high"}, State: "pending", UpstreamRequestID: "upstream-id", FirstTokenMs: &firstToken}
 	require.NoError(t, r.SaveClaudeAttempt(ctx, a))
 	rows, err := r.PendingClaudeAttempts(ctx)
 	require.NoError(t, err)
@@ -42,6 +42,10 @@ func TestClaudeBillingPostgresJournal(t *testing.T) {
 	require.Equal(t, "upstream-id", rows[0].UpstreamRequestID)
 	require.NotNil(t, rows[0].FirstTokenMs)
 	require.Equal(t, firstToken, *rows[0].FirstTokenMs)
+	require.Equal(t, "/v1/messages", rows[0].Snapshot.InboundEndpoint)
+	require.Equal(t, "/v1/messages", rows[0].Snapshot.UpstreamEndpoint)
+	require.Equal(t, "max", rows[0].Snapshot.RequestedReasoningEffort)
+	require.Equal(t, "high", rows[0].Snapshot.ReasoningEffort)
 	u := service.ClaudeUsage{}
 	a.Authoritative = &u
 	result, err := r.SettleClaudeAttempt(ctx, a, &service.UsageLog{}, &service.UsageBillingCommand{}, true)

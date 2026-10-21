@@ -34,7 +34,7 @@ func (r *usageBillingRepository) PendingClaudeAttempts(ctx context.Context) ([]s
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var attempts []service.ClaudeBillingAttempt
 	for rows.Next() {
 		var a service.ClaudeBillingAttempt
@@ -60,7 +60,7 @@ func (r *usageBillingRepository) SettleClaudeAttempt(ctx context.Context, a *ser
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var revision int
 	var state string
 	if err = tx.QueryRowContext(ctx, `SELECT revision,state FROM claude_billing_attempts WHERE id=$1 FOR UPDATE`, a.ID).Scan(&revision, &state); err != nil {

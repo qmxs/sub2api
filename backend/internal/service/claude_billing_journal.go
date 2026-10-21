@@ -52,6 +52,7 @@ type ClaudeBillingSnapshot struct {
 	AccountQuota      bool
 	StartedAt         time.Time
 	Stream            bool
+	started           bool
 }
 
 type ClaudeBillingAttempt struct {
@@ -79,8 +80,8 @@ type ClaudeBillingJournal interface {
 }
 
 func claudeBillingEnabled(ctx context.Context) bool {
-	_, ok := ctx.Value(claudeSnapshotKey{}).(*ClaudeBillingSnapshot)
-	return ok
+	snapshot, ok := ctx.Value(claudeSnapshotKey{}).(*ClaudeBillingSnapshot)
+	return ok && snapshot.started
 }
 
 func (s *GatewayService) claudeBillingContext(ctx context.Context, account *Account, parsed *ParsedRequest) context.Context {
@@ -93,6 +94,9 @@ func (s *GatewayService) claudeBillingContext(ctx context.Context, account *Acco
 	i, ok := ctx.Value(claudeIdentityKey{}).(claudeBillingIdentity)
 	if !ok || i.Key == nil || i.Key.User == nil || i.Key.Group == nil || i.Subscription != nil || i.Key.Group.IsSubscriptionType() {
 		return ctx
+	}
+	if i.At.IsZero() {
+		i.At = time.Now()
 	}
 	model := account.GetMappedModel(parsed.Model)
 	multiplier := s.ResolveUserGroupRateMultiplier(ctx, i.Key.UserID, i.Key.Group.ID, i.Key.Group.RateMultiplier)
@@ -119,7 +123,10 @@ func (s *GatewayService) doClaudeBillingUpstream(ctx context.Context, req *http.
 	if !ok {
 		return send()
 	}
-	j := s.usageBillingRepo.(ClaudeBillingJournal)
+	j, ok := s.usageBillingRepo.(ClaudeBillingJournal)
+	if !ok {
+		return nil, errors.New("durable billing repository unavailable")
+	}
 	a := &ClaudeBillingAttempt{ID: uuid.NewString(), LocalRequestID: resolveUsageBillingRequestID(ctx, ""), Snapshot: *snap, State: "running"}
 	a.Snapshot.StartedAt = time.Now()
 	dbctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -128,6 +135,7 @@ func (s *GatewayService) doClaudeBillingUpstream(ctx context.Context, req *http.
 	if err != nil {
 		return nil, fmt.Errorf("persist upstream billing attempt: %w", err)
 	}
+	snap.started = true
 	upctx, stop := context.WithTimeout(context.WithoutCancel(req.Context()), 15*time.Minute)
 	*req = *req.WithContext(upctx)
 	resp, err := send()
@@ -153,7 +161,11 @@ func (s *GatewayService) doClaudeBillingUpstream(ctx context.Context, req *http.
 func (s *GatewayService) saveClaudeAttempt(a *ClaudeBillingAttempt) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := s.usageBillingRepo.(ClaudeBillingJournal).SaveClaudeAttempt(ctx, a); err != nil {
+	j, ok := s.usageBillingRepo.(ClaudeBillingJournal)
+	if !ok {
+		return
+	}
+	if err := j.SaveClaudeAttempt(ctx, a); err != nil {
 		logger.LegacyPrintf("service.gateway", "ALERT claude billing journal persist failed attempt=%s: %v", a.ID, err)
 	}
 }
@@ -354,6 +366,9 @@ func (s *GatewayService) reconcileClaudeAttempt(ctx context.Context, a *ClaudeBi
 		actual, err := s.queryClaudeBill(ctx, a)
 		if err != nil {
 			_ = j.CheckClaudeAttempt(ctx, a.ID, err.Error())
+			// Save observed usage durably but wait for a complete authoritative bill before
+			// charging ambiguous streams: early deltas from compatible relays can change buckets.
+			return
 		} else {
 			u = *actual
 			a.Authoritative = actual
@@ -441,7 +456,8 @@ func queryNewAPIBillingWithCurl(ctx context.Context, base, token, user, requestI
 		return strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\n", "", "\r", "").Replace(s)
 	}
 	config := fmt.Sprintf("header = \"Authorization: Bearer %s\"\nheader = \"New-Api-User: %s\"\n", escape(token), escape(user))
-	cmd := exec.CommandContext(ctx, "curl", "--silent", "--show-error", "--fail", "--max-time", "12", "--max-filesize", "1048576", "--user-agent", "Sub2API-Billing-Reconcile/1.0", "--config", "-", u.String())
+	// No shell is involved; the only variable argument is a validated HTTPS URL.
+	cmd := exec.CommandContext(ctx, "curl", "--silent", "--show-error", "--fail", "--max-time", "12", "--max-filesize", "1048576", "--user-agent", "Sub2API-Billing-Reconcile/1.0", "--config", "-", "--", u.String()) // #nosec G702 -- fixed executable/flags, HTTPS URL encoded with net/url, secrets on stdin.
 	cmd.Stdin = strings.NewReader(config)
 	body, err := cmd.Output()
 	if err != nil {

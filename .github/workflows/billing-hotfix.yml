@@ -11,6 +11,16 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: integration-only
+          POSTGRES_DB: billing_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -28,6 +38,11 @@ jobs:
       - name: Compile application
         working-directory: backend
         run: go build -p 2 ./cmd/server
+      - name: PostgreSQL billing journal integration
+        working-directory: backend
+        env:
+          CLAUDE_TEST_DATABASE_URL: postgres://postgres:integration-only@localhost:5432/billing_test?sslmode=disable
+        run: go test -p 2 -tags=integration ./internal/repository -run '^TestClaudeBillingPostgresJournal$' -count=1 -timeout=5m
   image:
     needs: test
     runs-on: ubuntu-latest

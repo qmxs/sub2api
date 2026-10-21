@@ -15,7 +15,7 @@ import (
 func TestClaudeBillingSettlementIsAtomic(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	r := &usageBillingRepository{db: db}
 	u := service.ClaudeUsage{InputTokens: 82654}
 	a := &service.ClaudeBillingAttempt{ID: "attempt", Authoritative: &u}
@@ -40,7 +40,7 @@ func TestClaudeBillingSettlementIsAtomic(t *testing.T) {
 func TestClaudeBillingSettlementRejectsConcurrentReplay(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	r := &usageBillingRepository{db: db}
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT revision,state").WillReturnRows(sqlmock.NewRows([]string{"revision", "state"}).AddRow(1, "settled"))
@@ -54,7 +54,7 @@ func TestClaudeBillingSettlementRejectsConcurrentReplay(t *testing.T) {
 func TestClaudeBillingSettlementRollsBackDeductionOnLogFailure(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	r := &usageBillingRepository{db: db}
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT revision,state").WillReturnRows(sqlmock.NewRows([]string{"revision", "state"}).AddRow(0, "pending"))

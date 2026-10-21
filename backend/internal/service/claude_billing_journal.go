@@ -22,6 +22,7 @@ import (
 
 type claudeIdentityKey struct{}
 type claudeSnapshotKey struct{}
+type claudeBillingMetadataKey struct{}
 
 type claudeBillingIdentity struct {
 	Key          *APIKey
@@ -29,32 +30,47 @@ type claudeBillingIdentity struct {
 	At           time.Time
 }
 
+type claudeBillingMetadata struct {
+	InboundEndpoint          string
+	UpstreamEndpoint         string
+	RequestedReasoningEffort string
+}
+
 // WithClaudeBillingIdentity captures the actual selected group, including fallback routing.
 func WithClaudeBillingIdentity(ctx context.Context, key *APIKey, sub *UserSubscription, at time.Time) context.Context {
 	return context.WithValue(ctx, claudeIdentityKey{}, claudeBillingIdentity{key, sub, at})
 }
 
+func WithClaudeBillingMetadata(ctx context.Context, inbound, upstream, requestedReasoningEffort string) context.Context {
+	return context.WithValue(ctx, claudeBillingMetadataKey{}, claudeBillingMetadata{inbound, upstream, requestedReasoningEffort})
+}
+
 type ClaudeBillingSnapshot struct {
-	UserID            int64
-	APIKeyID          int64
-	GroupID           int64
-	AccountID         int64
-	Model             string
-	Multiplier        float64
-	AccountMultiplier float64
-	InputPrice        float64
-	OutputPrice       float64
-	WritePrice        float64
-	Write1hPrice      float64
-	ReadPrice         float64
-	KeyQuota          bool
-	KeyWindows        bool
-	AccountQuota      bool
-	StartedAt         time.Time
-	Stream            bool
-	UpstreamOrigin    string
-	UpstreamTokenName string
-	started           bool
+	UserID                   int64
+	APIKeyID                 int64
+	GroupID                  int64
+	AccountID                int64
+	Model                    string
+	Multiplier               float64
+	AccountMultiplier        float64
+	InputPrice               float64
+	OutputPrice              float64
+	WritePrice               float64
+	Write1hPrice             float64
+	ReadPrice                float64
+	KeyQuota                 bool
+	KeyWindows               bool
+	AccountQuota             bool
+	StartedAt                time.Time
+	Stream                   bool
+	UpstreamOrigin           string
+	UpstreamTokenName        string
+	RequestedModel           string
+	InboundEndpoint          string
+	UpstreamEndpoint         string
+	ReasoningEffort          string
+	RequestedReasoningEffort string
+	started                  bool
 }
 
 type ClaudeBillingAttempt struct {
@@ -119,6 +135,13 @@ func (s *GatewayService) claudeBillingContext(ctx context.Context, account *Acco
 	snapshot.Stream = parsed.Stream
 	snapshot.UpstreamOrigin = strings.TrimRight(strings.TrimSpace(account.GetCredential("base_url")), "/")
 	snapshot.UpstreamTokenName = account.GetExtraString("new_api_token_name")
+	snapshot.RequestedModel = parsed.Model
+	if metadata, ok := ctx.Value(claudeBillingMetadataKey{}).(claudeBillingMetadata); ok {
+		snapshot.InboundEndpoint = metadata.InboundEndpoint
+		snapshot.UpstreamEndpoint = metadata.UpstreamEndpoint
+		snapshot.RequestedReasoningEffort = metadata.RequestedReasoningEffort
+		snapshot.ReasoningEffort = metadata.RequestedReasoningEffort
+	}
 	return context.WithValue(ctx, claudeSnapshotKey{}, snapshot)
 }
 
@@ -468,7 +491,23 @@ func (s *GatewayService) reconcileClaudeAttempt(ctx context.Context, a *ClaudeBi
 		duration = int(a.FinishedAt.Sub(snap.StartedAt).Milliseconds())
 	}
 	mode := "token"
-	log := &UsageLog{UserID: snap.UserID, APIKeyID: snap.APIKeyID, AccountID: snap.AccountID, GroupID: &snap.GroupID, RequestID: requestID, Model: snap.Model, RequestedModel: snap.Model, UpstreamRequestID: optionalTrimmedStringPtr(a.UpstreamRequestID), RateMultiplier: snap.Multiplier, AccountRateMultiplier: &snap.AccountMultiplier, Stream: snap.Stream, DurationMs: &duration, FirstTokenMs: a.FirstTokenMs, BillingMode: &mode, CreatedAt: time.Now(), TotalCost: baseDelta, ActualCost: delta}
+	requestedModel := snap.RequestedModel
+	if requestedModel == "" {
+		requestedModel = snap.Model
+	}
+	log := &UsageLog{UserID: snap.UserID, APIKeyID: snap.APIKeyID, AccountID: snap.AccountID, GroupID: &snap.GroupID, RequestID: requestID, Model: snap.Model, RequestedModel: requestedModel, UpstreamRequestID: optionalTrimmedStringPtr(a.UpstreamRequestID), RateMultiplier: snap.Multiplier, AccountRateMultiplier: &snap.AccountMultiplier, Stream: snap.Stream, DurationMs: &duration, FirstTokenMs: a.FirstTokenMs, BillingMode: &mode, CreatedAt: time.Now(), TotalCost: baseDelta, ActualCost: delta}
+	if snap.InboundEndpoint != "" {
+		log.InboundEndpoint = &snap.InboundEndpoint
+	}
+	if snap.UpstreamEndpoint != "" {
+		log.UpstreamEndpoint = &snap.UpstreamEndpoint
+	}
+	if snap.ReasoningEffort != "" {
+		log.ReasoningEffort = &snap.ReasoningEffort
+	}
+	if snap.RequestedReasoningEffort != "" {
+		log.RequestedReasoningEffort = &snap.RequestedReasoningEffort
+	}
 	log.InputTokens = max(0, u.InputTokens-a.Billed.InputTokens)
 	log.OutputTokens = max(0, u.OutputTokens-a.Billed.OutputTokens)
 	log.CacheCreationTokens = max(0, u.CacheCreationInputTokens-a.Billed.CacheCreationInputTokens)

@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,16 +20,16 @@ func (r *usageBillingRepository) SaveClaudeAttempt(ctx context.Context, a *servi
 		return err
 	}
 	_, err = r.db.ExecContext(ctx, `INSERT INTO claude_billing_attempts
-	(id,account_id,api_key_id,local_request_id,upstream_request_id,snapshot,observed_usage,state,http_status,error_reason,started_at,finished_at)
-	VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+	(id,account_id,api_key_id,local_request_id,upstream_request_id,snapshot,observed_usage,state,http_status,error_reason,started_at,finished_at,first_token_ms)
+	VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 	ON CONFLICT(id) DO UPDATE SET upstream_request_id=EXCLUDED.upstream_request_id,
 	observed_usage=EXCLUDED.observed_usage,state=CASE WHEN claude_billing_attempts.state='settled' THEN 'settled' ELSE EXCLUDED.state END,
-	http_status=EXCLUDED.http_status,error_reason=EXCLUDED.error_reason,finished_at=EXCLUDED.finished_at,updated_at=now()`, a.ID, a.Snapshot.AccountID, a.Snapshot.APIKeyID, a.LocalRequestID, a.UpstreamRequestID, snapshot, usage, a.State, a.HTTPStatus, a.ErrorReason, a.Snapshot.StartedAt, a.FinishedAt)
+	http_status=EXCLUDED.http_status,error_reason=EXCLUDED.error_reason,finished_at=EXCLUDED.finished_at,first_token_ms=COALESCE(claude_billing_attempts.first_token_ms,EXCLUDED.first_token_ms),updated_at=now()`, a.ID, a.Snapshot.AccountID, a.Snapshot.APIKeyID, a.LocalRequestID, a.UpstreamRequestID, snapshot, usage, a.State, a.HTTPStatus, a.ErrorReason, a.Snapshot.StartedAt, a.FinishedAt, a.FirstTokenMs)
 	return err
 }
 
 func (r *usageBillingRepository) PendingClaudeAttempts(ctx context.Context) ([]service.ClaudeBillingAttempt, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id,local_request_id,upstream_request_id,snapshot,observed_usage,billed_usage,settled_cost,settled_base,revision,state,http_status,finished_at
+	rows, err := r.db.QueryContext(ctx, `SELECT id,local_request_id,upstream_request_id,snapshot,observed_usage,billed_usage,settled_cost,settled_base,revision,state,http_status,finished_at,first_token_ms
 	FROM claude_billing_attempts WHERE (state IN('pending','ready') OR (state='running' AND started_at<now()-interval '16 minutes'))
 	AND (checked_at IS NULL OR checked_at<now()-interval '2 minutes') ORDER BY (state='ready') DESC, checked_at NULLS FIRST,started_at LIMIT 1000`)
 	if err != nil {
@@ -39,8 +40,13 @@ func (r *usageBillingRepository) PendingClaudeAttempts(ctx context.Context) ([]s
 	for rows.Next() {
 		var a service.ClaudeBillingAttempt
 		var snapshot, observed, billed []byte
-		if err := rows.Scan(&a.ID, &a.LocalRequestID, &a.UpstreamRequestID, &snapshot, &observed, &billed, &a.SettledCost, &a.SettledBase, &a.Revision, &a.State, &a.HTTPStatus, &a.FinishedAt); err != nil {
+		var firstToken sql.NullInt64
+		if err := rows.Scan(&a.ID, &a.LocalRequestID, &a.UpstreamRequestID, &snapshot, &observed, &billed, &a.SettledCost, &a.SettledBase, &a.Revision, &a.State, &a.HTTPStatus, &a.FinishedAt, &firstToken); err != nil {
 			return nil, err
+		}
+		if firstToken.Valid {
+			value := int(firstToken.Int64)
+			a.FirstTokenMs = &value
 		}
 		if json.Unmarshal(snapshot, &a.Snapshot) != nil || json.Unmarshal(observed, &a.Observed) != nil || json.Unmarshal(billed, &a.Billed) != nil {
 			return nil, errors.New("invalid persisted billing attempt")

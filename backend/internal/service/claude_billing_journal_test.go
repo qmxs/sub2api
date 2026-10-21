@@ -50,3 +50,11 @@ func TestClaudeBillingObserverInitialOutputAndTail(t *testing.T) {
 	b.observeLine(`data: {"type":"message_delta","usage":{"output_tokens":15}}`)
 	require.Equal(t, 15, b.attempt.Observed.OutputTokens)
 }
+
+func TestClaudeBillingObserverIgnoresSSECommentsForFirstToken(t *testing.T) {
+	b := &claudeJournalBody{ReadCloser: io.NopCloser(strings.NewReader("")), attempt: &ClaudeBillingAttempt{Snapshot: ClaudeBillingSnapshot{StartedAt: time.Now().Add(-time.Second)}}, stream: true}
+	b.observeLine(": keepalive")
+	require.Nil(t, b.attempt.FirstTokenMs)
+	b.observeLine("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}")
+	require.NotNil(t, b.attempt.FirstTokenMs)
+}

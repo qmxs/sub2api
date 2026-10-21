@@ -26,17 +26,22 @@ func TestClaudeBillingPostgresJournal(t *testing.T) {
 	ctx := context.Background()
 	_, err = db.ExecContext(ctx, `CREATE TABLE usage_logs(id BIGSERIAL PRIMARY KEY)`)
 	require.NoError(t, err)
-	migration, err := os.ReadFile("../../migrations/239_claude_billing_journal.sql")
-	require.NoError(t, err)
-	_, err = db.ExecContext(ctx, string(migration))
-	require.NoError(t, err)
+	for _, path := range []string{"../../migrations/239_claude_billing_journal.sql", "../../migrations/240_claude_billing_first_token_ms.sql"} {
+		migration, readErr := os.ReadFile(path)
+		require.NoError(t, readErr)
+		_, err = db.ExecContext(ctx, string(migration))
+		require.NoError(t, err)
+	}
 	r := &usageBillingRepository{db: db}
-	a := &service.ClaudeBillingAttempt{ID: "pg-attempt", Snapshot: service.ClaudeBillingSnapshot{AccountID: 4, APIKeyID: 2, StartedAt: time.Now()}, State: "pending", UpstreamRequestID: "upstream-id"}
+	firstToken := 123
+	a := &service.ClaudeBillingAttempt{ID: "pg-attempt", Snapshot: service.ClaudeBillingSnapshot{AccountID: 4, APIKeyID: 2, StartedAt: time.Now()}, State: "pending", UpstreamRequestID: "upstream-id", FirstTokenMs: &firstToken}
 	require.NoError(t, r.SaveClaudeAttempt(ctx, a))
 	rows, err := r.PendingClaudeAttempts(ctx)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	require.Equal(t, "upstream-id", rows[0].UpstreamRequestID)
+	require.NotNil(t, rows[0].FirstTokenMs)
+	require.Equal(t, firstToken, *rows[0].FirstTokenMs)
 	u := service.ClaudeUsage{}
 	a.Authoritative = &u
 	result, err := r.SettleClaudeAttempt(ctx, a, &service.UsageLog{}, &service.UsageBillingCommand{}, true)

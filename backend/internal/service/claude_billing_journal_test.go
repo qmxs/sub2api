@@ -9,7 +9,7 @@ import (
 )
 
 func TestClaudeBillingInputWithoutOutput(t *testing.T) {
-	u, err := decodeNewAPIBillingUsage(newAPIBillingLog{Input: 82654, Other: `{"claude":true,"usage_semantic":"anthropic","cache_tokens":0,"cache_creation_tokens":0}`})
+	u, err := decodeNewAPIBillingUsage(newAPIBillingLog{Type: 2, Input: 82654, Other: `{"claude":true,"usage_semantic":"anthropic","cache_tokens":0,"cache_creation_tokens":0}`})
 	require.NoError(t, err)
 	base, actual := claudeTargetCost(ClaudeBillingSnapshot{InputPrice: 0.000005, OutputPrice: 0.000025, Multiplier: 0.029}, u)
 	require.InDelta(t, 0.41327, base, 1e-12)
@@ -17,14 +17,14 @@ func TestClaudeBillingInputWithoutOutput(t *testing.T) {
 }
 
 func TestNewAPIBillingCacheBucketsNotDoubleCounted(t *testing.T) {
-	u, err := decodeNewAPIBillingUsage(newAPIBillingLog{Input: 100, Output: 10, Other: `{"usage_semantic":"anthropic","cache_tokens":300,"cache_creation_tokens":200,"cache_creation_tokens_5m":150,"cache_creation_tokens_1h":50}`})
+	u, err := decodeNewAPIBillingUsage(newAPIBillingLog{Type: 2, Input: 100, Output: 10, Other: `{"usage_semantic":"anthropic","cache_tokens":300,"cache_creation_tokens":200,"cache_creation_tokens_5m":150,"cache_creation_tokens_1h":50}`})
 	require.NoError(t, err)
 	base, _ := claudeTargetCost(ClaudeBillingSnapshot{InputPrice: 5e-6, OutputPrice: 25e-6, WritePrice: 10e-6, Write1hPrice: 10e-6, ReadPrice: 0.5e-6, Multiplier: 1}, u)
 	require.InDelta(t, 0.0029, base, 1e-12)
 }
 
 func TestNewAPIBillingRejectsAmbiguousSemantics(t *testing.T) {
-	_, err := decodeNewAPIBillingUsage(newAPIBillingLog{Input: 100, Other: `{}`})
+	_, err := decodeNewAPIBillingUsage(newAPIBillingLog{Type: 2, Input: 100, Other: `{}`})
 	require.Error(t, err)
 }
 
@@ -35,8 +35,8 @@ func TestNewAPIBillingFailedCallHasNoCharge(t *testing.T) {
 }
 
 func TestNewAPIBillingRejectsNonConsumptionRecord(t *testing.T) {
-	_,err:=decodeNewAPIBillingUsage(newAPIBillingLog{Type:5,Input:82654,Other:`{"claude":true}`})
-	require.NoError(t,err)
+	_, err := decodeNewAPIBillingUsage(newAPIBillingLog{Type: 5, Input: 82654, Other: `{"claude":true}`})
+	require.NoError(t, err)
 }
 
 func TestClaudeBillingObserverInitialOutputAndTail(t *testing.T) {

@@ -41,8 +41,12 @@ func WithClaudeBillingIdentity(ctx context.Context, key *APIKey, sub *UserSubscr
 	return context.WithValue(ctx, claudeIdentityKey{}, claudeBillingIdentity{key, sub, at})
 }
 
-func WithClaudeBillingMetadata(ctx context.Context, inbound, upstream, requestedReasoningEffort string) context.Context {
-	return context.WithValue(ctx, claudeBillingMetadataKey{}, claudeBillingMetadata{inbound, upstream, requestedReasoningEffort})
+func WithClaudeBillingMetadata(ctx context.Context, inbound, upstream string, requestedReasoningEffort *string) context.Context {
+	effort := ""
+	if requestedReasoningEffort != nil {
+		effort = *requestedReasoningEffort
+	}
+	return context.WithValue(ctx, claudeBillingMetadataKey{}, claudeBillingMetadata{inbound, upstream, effort})
 }
 
 type ClaudeBillingSnapshot struct {
